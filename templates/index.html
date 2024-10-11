@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Audio Bot</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- Include jQuery -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
+    <!-- Include Roboto font -->
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700&display=swap" rel="stylesheet">
+    <!-- Custom Styles -->
+    <style>
+        html, body {
+            height: 100vh;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            font-family: 'Roboto', sans-serif;
+            display: flex;
+            flex-direction: column;
+            background-color: #f0f4f8;
+            color: #333;
+        }
+        h1 {
+            color: #2c3e50;
+            text-align: center;
+            margin: 20px 0;
+        }
+        #mainContainer {
+            display: flex;
+            flex-grow: 1;
+            margin-bottom: 20px;
+        }
+        #promptContainer, #output {
+            flex: 1;
+            margin: 0 10px;
+            display: flex;
+            flex-direction: column;
+            min-height: 0; /* Important for flex items with overflow */
+        }
+        #promptContainer:first-child, #output:first-child {
+            margin-left: 20px;
+        }
+        #promptContainer:last-child, #output:last-child {
+            margin-right: 20px;
+        }
+        textarea {
+            flex-grow: 1;
+            padding: 10px;
+            border-radius: 5px;
+            border: 1px solid #bdc3c7;
+            resize: vertical;
+            margin-bottom: 10px;
+        }
+        button {
+            background-color: #3498db;
+            color: white;
+            border: none;
+            cursor: pointer;
+            transition: background-color 0.3s;
+            font-size: 14px;
+            padding: 10px 20px;
+            border-radius: 5px;
+            display: inline-block;
+            margin: 5px 0;
+            width: auto;
+        }
+        button:hover {
+            background-color: #2980b9;
+        }
+        button:disabled {
+            background-color: #bdc3c7;
+            cursor: not-allowed;
+        }
+        #output {
+            border: 1px solid #bdc3c7;
+            background-color: white;
+            border-radius: 5px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            position: relative;
+            overflow: hidden;
+        }
+        #outputContent {
+            flex-grow: 1;
+            padding: 15px;
+            overflow-y: auto;
+            min-height: 0; /* Important for flex items with overflow */
+        }
+        .ai-response {
+            background-color: #e8f6fd;
+            padding: 10px;
+            border-radius: 5px;
+            margin-top: 10px;
+        }
+        #controlsContainer {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+        }
+        #startRecording, #stopRecording, #getResponse {
+            font-size: 12px;
+            padding: 5px 10px;
+            margin: 0 5px;
+        }
+        #stopRecording {
+            background-color: #e74c3c;
+        }
+        #stopRecording:hover {
+            background-color: #c0392b;
+        }
+        #getResponse {
+            background-color: #2ecc71;
+        }
+        #getResponse:hover {
+            background-color: #27ae60;
+        }
+        /* Ensure buttons wrap correctly */
+        #controlsContainer {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+        }
+    </style>
+</head>
+<body>
+    <h1>Audio Bot</h1>
+    <div id="mainContainer">
+        <div id="promptContainer">
+            <textarea id="systemPrompt" placeholder="Enter system prompt here...">You are an AI Sales Assistant designed to support sales conversations for Nexiserve, a company specializing in IT infrastructure, cloud solutions, cybersecurity, and managed services.</textarea>
+            <button id="submitPrompt">Submit Prompt</button>
+        </div>
+        <div id="output">
+            <div id="outputContent">
+                <!-- AI responses will appear here -->
+            </div>
+            <div id="controlsContainer">
+                <button id="startRecording">Start Recording</button>
+                <button id="stopRecording" disabled>Stop Recording</button>
+                <button id="getResponse">Get Response</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        $(document).ready(function() {
+            const outputContent = $('#outputContent');
+            let eventSource;
+            let systemPrompt = '';
+            let transcriptions = [];
+
+            $('#submitPrompt').click(function() {
+                systemPrompt = $('#systemPrompt').val();
+                alert('Prompt submitted successfully!');
+            });
+
+            $('#startRecording').click(function() {
+                if (!systemPrompt) {
+                    alert('Please submit a system prompt first.');
+                    return;
+                }
+                $.post('/start_recording', function(data) {
+                    console.log(data);
+                    outputContent.append('<p>Recording started...</p>');
+                    $('#startRecording').prop('disabled', true);
+                    $('#stopRecording').prop('disabled', false);
+
+                    if (eventSource) {
+                        eventSource.close();
+                    }
+
+                    eventSource = new EventSource('/stream');
+
+                    eventSource.onmessage = function(event) {
+                        const data = JSON.parse(event.data);
+                        if (data.transcription) {
+                            const transcription = data.transcription.trim();
+                            if (isValidTranscription(transcription)) {
+                                transcriptions.push({ role: 'user', content: transcription });
+                                // Do not display the transcription in HTML
+                            }
+                        }
+                    };
+
+                    eventSource.onerror = function(error) {
+                        console.error('EventSource failed:', error);
+                        eventSource.close();
+                    };
+                });
+            });
+
+            $('#stopRecording').click(function() {
+                $.post('/stop_recording', function(data) {
+                    console.log(data);
+                    outputContent.append('<p>Recording stopped.</p>');
+                    $('#startRecording').prop('disabled', false);
+                    $('#stopRecording').prop('disabled', true);
+                    if (eventSource) {
+                        eventSource.close();
+                    }
+                });
+            });
+
+            $('#getResponse').click(function() {
+                if (transcriptions.length === 0) {
+                    alert('No transcriptions available to generate a response.');
+                    return;
+                }
+
+                const responseElement = $('<p class="ai-response"></p>');
+                outputContent.append(responseElement);
+                $('#outputContent').scrollTop($('#outputContent')[0].scrollHeight);
+
+                fetch('/get_response', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        messages: transcriptions,
+                        systemPrompt: systemPrompt
+                    }),
+                })
+                .then(response => response.body)
+                .then(rb => {
+                    const reader = rb.getReader();
+                    return new ReadableStream({
+                        start(controller) {
+                            function push() {
+                                reader.read().then(({ done, value }) => {
+                                    if (done) {
+                                        controller.close();
+                                        return;
+                                    }
+                                    const chunk = new TextDecoder("utf-8").decode(value);
+                                    const dataLines = chunk.split('\n');
+                                    for (let line of dataLines) {
+                                        if (line.startsWith('data: ')) {
+                                            const data = JSON.parse(line.substring(6));
+                                            responseElement.append(data.chunk);
+                                        }
+                                    }
+                                    $('#outputContent').scrollTop($('#outputContent')[0].scrollHeight);
+                                    push();
+                                });
+                            }
+                            push();
+                        }
+                    });
+                })
+                .then(stream => new Response(stream))
+                .catch(err => {
+                    console.error(err);
+                });
+            });
+
+            function isValidTranscription(transcription) {
+                const minLength = 5;
+                const maxLength = 200;
+                const bannedPhrases = ['thank you for watching', 'have a nice day', 'background noise'];
+
+                if (transcription.length < minLength || transcription.length > maxLength) {
+                    return false;
+                }
+
+                for (const phrase of bannedPhrases) {
+                    if (transcription.toLowerCase().includes(phrase)) {
+                        return false;
+                    }
+                }
+
+                return true;
+            }
+        });
+    </script>
+</body>
+</html>
