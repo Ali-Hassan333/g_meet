@@ -1,15 +1,11 @@
 from flask import Flask, Response, render_template, request, jsonify, stream_with_context
 import openai
-import wave
-import tempfile
+
 import os
-import numpy as np
-import sounddevice as sd
-import threading
-import queue
-import time
+
+
 import json
-import webrtcvad
+
 import logging
 
 # Configure logging
@@ -21,82 +17,19 @@ app = Flask(__name__)
 openai.api_key = os.getenv("OPENAI_API_KEY")  # Set this in your environment
 
 # Global variables
-audio_queue = queue.Queue()
-is_recording = False
-sample_rate = 16000
 
-# Voice Activity Detection
-vad = webrtcvad.Vad(3)
 
-def is_valid_transcription(transcription):
-    min_length = 5
-    max_length = 200
-    banned_phrases = [
-        'um', 'uh', 'ah', 'oh',
-        'thanks for watching', 'thank you for watching', 'background noise'
-    ]
-
-    if len(transcription) < min_length or len(transcription) > max_length:
-        return False
-
-    for phrase in banned_phrases:
-        if phrase in transcription:
-            return False
-
-    return True
-
-def record_audio():
-    global is_recording
-    is_recording = True
-
-    frame_duration_ms = 30
-    frame_size = int(sample_rate * frame_duration_ms / 1000)
-
-    speech_frames = []
-    silence_frames = 0
-    max_silence_frames = int(0.5 * 1000 / frame_duration_ms)  # 0.5 seconds of silence
-
-    with sd.RawInputStream(samplerate=sample_rate, channels=1, dtype='int16') as stream:
-        print("Recording started...")
-        while is_recording:
-            audio_frame = stream.read(frame_size)[0]
-            if len(audio_frame) == 0:
-                continue
-
-            is_speech = vad.is_speech(audio_frame, sample_rate)
-
-            if is_speech:
-                speech_frames.append(audio_frame)
-                silence_frames = 0
-            else:
-                if speech_frames:
-                    silence_frames += 1
-                    if silence_frames > max_silence_frames:
-                        audio_data = b''.join(speech_frames)
-                        audio_queue.put(audio_data)
-                        speech_frames = []
-                        silence_frames = 0
-                else:
-                    pass
-
-            time.sleep(frame_duration_ms / 1000.0)
-
-        if speech_frames:
-            audio_data = b''.join(speech_frames)
-            audio_queue.put(audio_data)
-
-def transcribe_audio(filename):
-    with open(filename, 'rb') as audio_file:
-        try:
-            transcription_response = openai.Audio.transcribe(
-                model='whisper-1',
-                file=audio_file,  # Pass the file object directly
-                response_format='json',
-                language='en'
-            )
-        except Exception as e:
-            logging.error("Error during transcription", exc_info=True)
-            return ""
+def transcribe_audio(audio_file):
+    try:
+        transcription_response = openai.Audio.transcribe(
+            model='whisper-1',
+            file=audio_file,
+            response_format='json',
+            language='en'
+        )
+    except Exception as e:
+        logging.error("Error during transcription", exc_info=True)
+        return ""
 
     transcription = transcription_response.get('text', '').strip()
     print(transcription)
@@ -126,6 +59,57 @@ def generate_response(messages, system_prompt):
 @app.route('/')
 def index():
     return render_template('index.html')
+@app.route('/transcribe', methods=['POST'])
+def transcribe():
+    if 'audio' not in request.files:
+        return jsonify({'error': 'No audio file provided'}), 400
+
+    audio_file = request.files['audio']
+    
+    # Log file details
+    app.logger.info(f"Received file: {audio_file.filename}")
+    app.logger.info(f"File content type: {audio_file.content_type}")
+    
+    # Ensure the file has a filename
+    if audio_file.filename == '':
+        return jsonify({'error': 'No selected file'}), 400
+    
+    # Check if the file type is supported
+    if not audio_file.filename.lower().endswith(('.wav', '.mp3', '.ogg')):
+        return jsonify({'error': 'Unsupported file type'}), 400
+
+    # Save the file temporarily
+    temp_path = os.path.join('/tmp', 'temp_audio.wav')
+    audio_file.save(temp_path)
+    
+    try:
+        with open(temp_path, 'rb') as audio_data:
+            transcription = transcribe_audio(audio_data)
+        os.remove(temp_path)  # Clean up
+        return jsonify({'transcription': transcription})
+    except Exception as e:
+        os.remove(temp_path)  # Clean up
+        app.logger.error(f"Transcription error: {str(e)}")
+        return jsonify({'error': 'Transcription failed'}), 500
+
+def transcribe_audio(audio_file):
+    try:
+        transcription_response = openai.Audio.transcribe(
+            model='whisper-1',
+            file=audio_file,
+            response_format='json',
+            language='en'
+        )
+    except openai.error.InvalidRequestError as e:
+        app.logger.error(f"OpenAI API error: {str(e)}")
+        raise
+    except Exception as e:
+        app.logger.error(f"Unexpected error during transcription: {str(e)}")
+        raise
+
+    transcription = transcription_response.get('text', '').strip()
+    app.logger.info(f"Transcription: {transcription}")
+    return transcription
 
 @app.route('/get_response', methods=['POST'])
 def get_response():
@@ -139,45 +123,9 @@ def get_response():
 
     return Response(stream_with_context(generate()), content_type='text/event-stream')
 
-@app.route('/start_recording', methods=['POST'])
-def start_recording_route():
-    global is_recording
-    if not is_recording:
-        threading.Thread(target=record_audio, daemon=True).start()
-        return jsonify({'status': 'Recording started'})
-    return jsonify({'status': 'Already recording'})
 
-@app.route('/stop_recording', methods=['POST'])
-def stop_recording():
-    global is_recording
-    is_recording = False
-    return jsonify({'status': 'Recording stopped'})
 
-@app.route('/stream')
-def stream():
-    def event_stream():
-        while True:
-            if not audio_queue.empty():
-                audio_data = audio_queue.get()
-                with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as temp_audio:
-                    with wave.open(temp_audio.name, 'wb') as wf:
-                        wf.setnchannels(1)
-                        wf.setsampwidth(2)  # 16-bit audio
-                        wf.setframerate(sample_rate)
-                        wf.writeframes(audio_data)
 
-                    transcription = transcribe_audio(temp_audio.name)
-
-                if transcription:
-                    cleaned_transcription = transcription.strip().lower()
-                    if is_valid_transcription(cleaned_transcription):
-                        yield f"data: {json.dumps({'transcription': transcription})}\n\n"
-                    else:
-                        print("Transcription discarded due to common phrase or short length.")
-            else:
-                time.sleep(0.1)
-
-    return Response(stream_with_context(event_stream()), content_type='text/event-stream')
 
 if __name__ == "__main__":
     app.run(debug=True)
