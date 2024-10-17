@@ -8,6 +8,7 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
     <!-- Include Roboto font -->
     <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700&display=swap" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/recorderjs/0.1.0/recorder.js"></script>
     <!-- Custom Styles -->
     <style>
         html, body {
@@ -145,9 +146,11 @@
     <script>
         $(document).ready(function() {
             const outputContent = $('#outputContent');
-            let eventSource;
             let systemPrompt = '';
             let transcriptions = [];
+            let audioRecorder;
+            let audioContext;
+            let recordedChunks = [];
 
             $('#submitPrompt').click(function() {
                 systemPrompt = $('#systemPrompt').val();
@@ -159,48 +162,66 @@
                     alert('Please submit a system prompt first.');
                     return;
                 }
-                $.post('/start_recording', function(data) {
-                    console.log(data);
-                    outputContent.append('<p>Recording started...</p>');
-                    $('#startRecording').prop('disabled', true);
-                    $('#stopRecording').prop('disabled', false);
-
-                    if (eventSource) {
-                        eventSource.close();
-                    }
-
-                    eventSource = new EventSource('/stream');
-
-                    eventSource.onmessage = function(event) {
-                        const data = JSON.parse(event.data);
-                        if (data.transcription) {
-                            const transcription = data.transcription.trim();
-                            if (isValidTranscription(transcription)) {
-                                transcriptions.push({ role: 'user', content: transcription });
-                                // Do not display the transcription in HTML
-                            }
-                        }
-                    };
-
-                    eventSource.onerror = function(error) {
-                        console.error('EventSource failed:', error);
-                        eventSource.close();
-                    };
-                });
+                startRecording();
             });
 
             $('#stopRecording').click(function() {
-                $.post('/stop_recording', function(data) {
-                    console.log(data);
-                    outputContent.append('<p>Recording stopped.</p>');
-                    $('#startRecording').prop('disabled', false);
-                    $('#stopRecording').prop('disabled', true);
-                    if (eventSource) {
-                        eventSource.close();
-                    }
-                });
+                stopRecording();
             });
 
+            let mediaRecorder;
+let audioChunks = [];
+
+function startRecording() {
+  navigator.mediaDevices.getUserMedia({ audio: true })
+    .then(stream => {
+      mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+      mediaRecorder.ondataavailable = event => {
+        audioChunks.push(event.data);
+      };
+      mediaRecorder.onstop = sendAudioToServer;
+      mediaRecorder.start();
+      console.log('Recording started');
+      $('#startRecording').prop('disabled', true);
+      $('#stopRecording').prop('disabled', false);
+    })
+    .catch(err => {
+      console.error('Error accessing microphone:', err);
+      alert('Error accessing microphone. Please check your browser settings.');
+    });
+}
+
+function stopRecording() {
+  mediaRecorder.stop();
+  $('#startRecording').prop('disabled', false);
+  $('#stopRecording').prop('disabled', true);
+}
+
+function sendAudioToServer() {
+  const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+  audioChunks = [];
+  
+  const formData = new FormData();
+  formData.append('audio', audioBlob, 'recording.wav');
+
+  fetch('/transcribe', {
+    method: 'POST',
+    body: formData
+  })
+  .then(response => response.json())
+  .then(data => {
+    if (data.transcription) {
+      const transcription = data.transcription.trim();
+      if (isValidTranscription(transcription)) {
+        transcriptions.push({ role: 'user', content: transcription });
+        outputContent.append(`<p>Transcription: ${transcription}</p>`);
+      }
+    }
+  })
+  .catch(error => {
+    console.error('Error:', error);
+  });
+}
             $('#getResponse').click(function() {
                 if (transcriptions.length === 0) {
                     alert('No transcriptions available to generate a response.');
